@@ -26,6 +26,25 @@ typedef struct {
     volatile LONGLONG totalWritten;
 } PIPELINE;
 
+int get_system_drive_number() {
+    HANDLE hVol = CreateFileA("\\\\.\\C:", GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (hVol == INVALID_HANDLE_VALUE) return -1;
+
+    BYTE buffer[1024];
+    DWORD bytesReturned;
+    if (!DeviceIoControl(hVol, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+        NULL, 0, buffer, sizeof(buffer), &bytesReturned, NULL)) {
+        CloseHandle(hVol);
+        return -1;
+    }
+
+    VOLUME_DISK_EXTENTS* ext = (VOLUME_DISK_EXTENTS*)buffer;
+    int diskNumber = (int)ext->Extents[0].DiskNumber;
+    CloseHandle(hVol);
+    return diskNumber;
+}
+
 void draw_progress(double progress, double mbPerSec, double secLeft) {
     int filled = (int)(progress * PROGRESS_BAR_WIDTH);
     printf("\r[");
@@ -229,6 +248,17 @@ int main() {
     getchar();
     if (sel < 1 || sel > count) {
         printf("잘못된 선택입니다.\n");
+        return 1;
+    }
+
+    DiskInfo* selectedDisk = &disks[sel - 1];
+    int systemDriveNum = get_system_drive_number();
+
+    if (systemDriveNum == -1) {
+        printf("시스템 드라이브 정보를 가져올 수 없습니다.\n");
+    }
+    else if (selectedDisk->index == systemDriveNum) {
+        printf("선택한 디스크는 시스템 드라이브(C:) 입니다.\n");
         return 1;
     }
 
