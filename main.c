@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <time.h>
 
-#define BUFFER_SIZE (512 * 1024 * 1024)  // 512MB
+#define BUFFER_SIZE (256 * 1024 * 1024) // 256MB x 2
 #define PROGRESS_BAR_WIDTH 50
 
 typedef struct {
@@ -16,9 +16,9 @@ typedef struct {
 } DiskInfo;
 
 typedef struct {
-    BYTE* buffer;
-    DWORD bytes;
-    volatile BOOL ready;
+    BYTE* buffer[2];
+    DWORD bytes[2];
+    volatile BOOL ready[2];
     volatile BOOL done;
     HANDLE hDisk;
     HANDLE hImage;
@@ -115,18 +115,23 @@ DWORD WINAPI ReaderThread(LPVOID param) {
     PIPELINE* pipe = (PIPELINE*)param;
     LONGLONG offset = 0;
     DWORD bytesRead;
+    int idx = 0;
 
     while (offset < pipe->totalSize) {
-        while (pipe->ready) Sleep(1);
+        while (pipe->ready[idx]) Sleep(1);
 
-        if (!ReadFile(pipe->hDisk, pipe->buffer, BUFFER_SIZE, &bytesRead, NULL) || bytesRead == 0) {
+        if (!ReadFile(pipe->hDisk, pipe->buffer[idx], BUFFER_SIZE, &bytesRead, NULL) || bytesRead == 0) {
             pipe->done = TRUE;
             break;
         }
-        pipe->bytes = bytesRead;
-        pipe->ready = TRUE;
+
+        pipe->bytes[idx] = bytesRead;
+        pipe->ready[idx] = TRUE;
         offset += bytesRead;
+
+        idx = 1 - idx;
     }
+
     pipe->done = TRUE;
     return 0;
 }
@@ -135,12 +140,13 @@ DWORD WINAPI WriterThread(LPVOID param) {
     PIPELINE* pipe = (PIPELINE*)param;
     DWORD bytesWritten;
     clock_t start = clock();
+    int idx = 0;
 
-    while (!pipe->done || pipe->ready) {
-        if (pipe->ready) {
-            WriteFile(pipe->hImage, pipe->buffer, pipe->bytes, &bytesWritten, NULL);
+    while (!pipe->done || pipe->ready[0] || pipe->ready[1]) {
+        if (pipe->ready[idx]) {
+            WriteFile(pipe->hImage, pipe->buffer[idx], pipe->bytes[idx], &bytesWritten, NULL);
             pipe->totalWritten += bytesWritten;
-            pipe->ready = FALSE;
+            pipe->ready[idx] = FALSE;
 
             clock_t now = clock();
             double elapsedSec = (double)(now - start) / CLOCKS_PER_SEC;
@@ -148,10 +154,21 @@ DWORD WINAPI WriterThread(LPVOID param) {
             double speed = mbWritten / elapsedSec;
             double progress = (double)pipe->totalWritten / pipe->totalSize;
             double eta = (pipe->totalSize - pipe->totalWritten) / (speed * 1024 * 1024);
-            draw_progress(progress, speed, eta);
+
+            int filled = (int)(progress * PROGRESS_BAR_WIDTH);
+            printf("\r[");
+            for (int i = 0; i < PROGRESS_BAR_WIDTH; i++)
+                printf(i < filled ? "#" : " ");
+            printf("] %.1f%% %.2f MB/s ETA %.1fs", progress * 100, speed, eta);
+            fflush(stdout);
         }
-        else Sleep(1);
+        else {
+            Sleep(1);
+        }
+
+        idx = 1 - idx;
     }
+
     return 0;
 }
 
@@ -194,16 +211,27 @@ void process_disk(const char* diskPath, const char* imagePath, BOOL isBackup) {
         return;
     }
 
+    LARGE_INTEGER sz;
+    if (isBackup)
+        DeviceIoControl(hDisk, IOCTL_DISK_GET_LENGTH_INFO, NULL, 0, &sz, sizeof(sz), NULL, NULL);
+    else
+        GetFileSizeEx(hImage, &sz);
+
+    LONGLONG totalSize = sz.QuadPart;
     printf("%s 시작 (%.2f GB)\n", isBackup ? "백업" : "복원", size / (1024.0 * 1024 * 1024));
 
     PIPELINE pipe = { 0 };
-    pipe.buffer = (BYTE*)_aligned_malloc(BUFFER_SIZE, 4096);
     pipe.hDisk = hDisk;
     pipe.hImage = hImage;
-    pipe.totalSize = size;
-    pipe.ready = FALSE;
+    pipe.totalSize = totalSize;
     pipe.done = FALSE;
+    pipe.ready[0] = FALSE;
+    pipe.ready[1] = FALSE;
     pipe.totalWritten = 0;
+
+    // 두 버퍼 생성
+    pipe.buffer[0] = (BYTE*)_aligned_malloc(BUFFER_SIZE, 4096);
+    pipe.buffer[1] = (BYTE*)_aligned_malloc(BUFFER_SIZE, 4096);
 
     HANDLE hReadThread = CreateThread(NULL, 0, ReaderThread, &pipe, 0, NULL);
     HANDLE hWriteThread = CreateThread(NULL, 0, WriterThread, &pipe, 0, NULL);
@@ -213,15 +241,21 @@ void process_disk(const char* diskPath, const char* imagePath, BOOL isBackup) {
 
     printf("\n완료: %s\n", imagePath);
 
-    _aligned_free(pipe.buffer);
+    _aligned_free(pipe.buffer[0]);
+    _aligned_free(pipe.buffer[1]);
     CloseHandle(hDisk);
     CloseHandle(hImage);
 }
 
 int main() {
-    printf("> L A G O (Like Ghost)\n\n");
+    printf("   __   ___  _________     \n");
+    printf("  / /  / _ |/ ___/ __ \\   \n");
+    printf(" / /__/ __ / (_ / /_/ /    \n");
+    printf("/____/_/ |_\\___/\\____/   \n\n");
+    printf(">> L A G O (Like Ghost)\n");
+    printf(">> (C) ROKN. 702th. KIM SANG YUN.\n\n");
     printf("[1] 디스크 → 이미지 (이미지 백업)\n");
-    printf("[2] 이미지 → 디스크 (이미지 복원)\n");
+    printf("[2] 이미지 → 디스크 (이미지 복원)\n\n");
     printf("선택 (1/2): ");
 
     int mode; scanf("%d", &mode); getchar();
