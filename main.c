@@ -144,7 +144,25 @@ DWORD WINAPI WriterThread(LPVOID param) {
 
     while (!pipe->done || pipe->ready[0] || pipe->ready[1]) {
         if (pipe->ready[idx]) {
-            WriteFile(pipe->hImage, pipe->buffer[idx], pipe->bytes[idx], &bytesWritten, NULL);
+            BOOL allZero = TRUE;
+
+            for (DWORD i = 0; i < pipe->bytes[idx]; i++) {
+                if (pipe->buffer[idx][i] != 0) { allZero = FALSE; break; }
+            }
+
+            if (allZero) {
+                FILE_ZERO_DATA_INFORMATION zeroData;
+                zeroData.FileOffset.QuadPart = pipe->totalWritten;
+                zeroData.BeyondFinalZero.QuadPart = pipe->totalWritten + pipe->bytes[idx];
+
+                DWORD tmp;
+                DeviceIoControl(pipe->hImage, FSCTL_SET_ZERO_DATA,
+                    &zeroData, sizeof(zeroData), NULL, 0, &tmp, NULL);
+            }
+            else {
+                WriteFile(pipe->hImage, pipe->buffer[idx], pipe->bytes[idx], &bytesWritten, NULL);
+            }
+
             pipe->totalWritten += bytesWritten;
             pipe->ready[idx] = FALSE;
 
@@ -196,6 +214,9 @@ void process_disk(const char* diskPath, const char* imagePath, BOOL isBackup) {
         CloseHandle(hDisk);
         return;
     }
+
+    DWORD tmp;
+    DeviceIoControl(hImage, FSCTL_SET_SPARSE, NULL, 0, NULL, 0, &tmp, NULL);
 
     LONGLONG size = isBackup ? get_disk_size(diskPath) : 0;
     if (!isBackup) {
@@ -253,7 +274,7 @@ int main() {
     printf(" / /__/ __ / (_ / /_/ /    \n");
     printf("/____/_/ |_\\___/\\____/   \n\n");
     printf(">> L A G O (Like Ghost)\n");
-    printf(">> (C) ROKN. 702th. KIM SANG YUN.\n\n");
+    printf(">> (C) ROKN. KIM SANG YUN.\n\n");
     printf("[1] 디스크 → 이미지 (이미지 백업)\n");
     printf("[2] 이미지 → 디스크 (이미지 복원)\n\n");
     printf("선택 (1/2): ");
