@@ -5,7 +5,8 @@
 #include <stdlib.h>
 #include <time.h>
 
-#define BUFFER_SIZE (256 * 1024 * 1024) // 256MB x 2
+#define BUFFER_COUNT 4
+#define BUFFER_SIZE (128 * 1024 * 1024) // 128 x 4
 #define PROGRESS_BAR_WIDTH 50
 
 typedef struct {
@@ -16,9 +17,9 @@ typedef struct {
 } DiskInfo;
 
 typedef struct {
-    BYTE* buffer[2];
-    DWORD bytes[2];
-    volatile BOOL ready[2];
+    BYTE* buffer[BUFFER_COUNT];
+    DWORD bytes[BUFFER_COUNT];
+    volatile BOOL ready[BUFFER_COUNT];
     volatile BOOL done;
     HANDLE hDisk;
     HANDLE hImage;
@@ -129,7 +130,7 @@ DWORD WINAPI ReaderThread(LPVOID param) {
         pipe->ready[idx] = TRUE;
         offset += bytesRead;
 
-        idx = 1 - idx;
+        idx = (idx + 1) % BUFFER_COUNT;
     }
 
     pipe->done = TRUE;
@@ -142,10 +143,9 @@ DWORD WINAPI WriterThread(LPVOID param) {
     clock_t start = clock();
     int idx = 0;
 
-    while (!pipe->done || pipe->ready[0] || pipe->ready[1]) {
+    while (!pipe->done || pipe->ready[0] || pipe->ready[1] || pipe->ready[2] || pipe->ready[3]) {
         if (pipe->ready[idx]) {
             BOOL allZero = TRUE;
-
             for (DWORD i = 0; i < pipe->bytes[idx]; i++) {
                 if (pipe->buffer[idx][i] != 0) { allZero = FALSE; break; }
             }
@@ -154,10 +154,9 @@ DWORD WINAPI WriterThread(LPVOID param) {
                 FILE_ZERO_DATA_INFORMATION zeroData;
                 zeroData.FileOffset.QuadPart = pipe->totalWritten;
                 zeroData.BeyondFinalZero.QuadPart = pipe->totalWritten + pipe->bytes[idx];
-
                 DWORD tmp;
-                DeviceIoControl(pipe->hImage, FSCTL_SET_ZERO_DATA,
-                    &zeroData, sizeof(zeroData), NULL, 0, &tmp, NULL);
+                DeviceIoControl(pipe->hImage, FSCTL_SET_ZERO_DATA, &zeroData, sizeof(zeroData), NULL, 0, &tmp, NULL);
+                bytesWritten = pipe->bytes[idx];
             }
             else {
                 WriteFile(pipe->hImage, pipe->buffer[idx], pipe->bytes[idx], &bytesWritten, NULL);
@@ -180,15 +179,14 @@ DWORD WINAPI WriterThread(LPVOID param) {
             printf("] %.1f%% %.2f MB/s ETA %.1fs", progress * 100, speed, eta);
             fflush(stdout);
         }
-        else {
-            Sleep(1);
-        }
+        else Sleep(1);
 
-        idx = 1 - idx;
+        idx = (idx + 1) % BUFFER_COUNT;
     }
 
     return 0;
 }
+
 
 void process_disk(const char* diskPath, const char* imagePath, BOOL isBackup) {
     if (!isBackup) {
@@ -246,13 +244,13 @@ void process_disk(const char* diskPath, const char* imagePath, BOOL isBackup) {
     pipe.hImage = hImage;
     pipe.totalSize = totalSize;
     pipe.done = FALSE;
-    pipe.ready[0] = FALSE;
-    pipe.ready[1] = FALSE;
     pipe.totalWritten = 0;
 
-    // 두 버퍼 생성
-    pipe.buffer[0] = (BYTE*)_aligned_malloc(BUFFER_SIZE, 4096);
-    pipe.buffer[1] = (BYTE*)_aligned_malloc(BUFFER_SIZE, 4096);
+    for (int i = 0; i < BUFFER_COUNT; i++) {
+        pipe.buffer[i] = (BYTE*)_aligned_malloc(BUFFER_SIZE, 4096);
+        pipe.ready[i] = FALSE;
+    }
+
 
     HANDLE hReadThread = CreateThread(NULL, 0, ReaderThread, &pipe, 0, NULL);
     HANDLE hWriteThread = CreateThread(NULL, 0, WriterThread, &pipe, 0, NULL);
@@ -262,8 +260,8 @@ void process_disk(const char* diskPath, const char* imagePath, BOOL isBackup) {
 
     printf("\n완료: %s\n", imagePath);
 
-    _aligned_free(pipe.buffer[0]);
-    _aligned_free(pipe.buffer[1]);
+    for (int i = 0; i < BUFFER_COUNT; i++) _aligned_free(pipe.buffer[i]);
+
     CloseHandle(hDisk);
     CloseHandle(hImage);
 }
